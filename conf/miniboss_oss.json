@@ -12,8 +12,8 @@
     "job_name": "miniboss_oss",
     "dynamicAllocation": false,
     "initialExecutors": 2,
-    "raw_root": "hdfs:///datalake/raw/miniboss_oss",
-    "final_root": "hdfs:///datalake/final/miniboss_oss",
+    "raw_root": "hdfs:///datalake/prod_dl/miniboss_oss/raw",
+    "final_root": "hdfs:///datalake/prod_dl/miniboss_bss/final",
     "timezone": "Asia/Kolkata",
     "append_table_schema": false,
     "max_parallel_tables": 4,
@@ -21,7 +21,7 @@
     "compression": "snappy",
     "finalize_full_refresh": true,
     "finalize_strategy": "copy_and_swap_final",
-    "hive": { "enabled": true, "db": "miniboss_dl_oss" },
+    "hive": { "enabled": true, "db": "miniboss_oss" },
 
     "state_backend": "singlestore",
     "state": {
@@ -33,11 +33,11 @@
         "database": "monitoring2",
         "eventsTable": "control_etl_events",
         "watermarksTable": "control_watermarks",
-        "sourceId": "miniboss-oss-datalake"
+        "sourceId": "miniboss-oss-prod-dl"
       }
     },
     "staging": {
-      "root": "hdfs:///datalake/_staging_slices",
+      "root": "hdfs:///datalake/prod_dl/miniboss_oss_staging_slices",
       "ttl_hours": 72,
       "enabled": true
     },
@@ -52,18 +52,20 @@
       "enabled": true,
       "type": "iceberg",
       "_type_options": "iceberg | parquet",
-      "catalog": "ice",
-      "db": "staging",
-      "warehouse": "hdfs:///datalake/miniboss_oss/intermediate/iceberg"
+      "catalog": "ice_hive",
+      "catalog_type": "hive",
+      "metastore_uri": "thrift://ruh-bdcldp01.itc.local:9083,thrift://ruh-bdcldp03.itc.local:9083",
+      "db": "miniboss_oss",
+      "warehouse": "hdfs:///datalake/prod_dl/miniboss_oss/intermediate/iceberg"
     },
     "final_parquet_mirror": {
-      "enabled": true,
+      "enabled": false,
       "root": "hdfs:///datalake/miniboss_oss/final_parquet",
       "partition_col": "load_date"
     },
     "hive_reg": {
       "doc": "Used for SCD1 Final",
-      "enabled": true,
+      "enabled": false,
       "db": "miniboss_dl_oss",
       "partition_col": "load_date",
       "use_msck": false

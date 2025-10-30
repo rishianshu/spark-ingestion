@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, Mapping, Optional
 
 from salam_ingest.common import PrintLogger
 from salam_ingest.events import emit_log
@@ -10,7 +10,13 @@ from salam_ingest.metadata.cache import MetadataCacheConfig, MetadataCacheManage
 from salam_ingest.metadata.core import JsonFileMetadataRepository, MetadataTarget
 from salam_ingest.metadata.consumers import PrecisionGuardrailEvaluator
 from salam_ingest.metadata.services import MetadataCollectionService, MetadataJob, MetadataServiceConfig
-from salam_ingest.metadata.utils import safe_upper
+from salam_ingest.metadata.schema import (
+    SchemaDriftPolicy,
+    SchemaDriftValidator,
+    SchemaSnapshot,
+    SchemaSnapshotColumn,
+)
+from salam_ingest.metadata.utils import safe_upper, to_serializable
 from salam_ingest.tools.base import ExecutionTool
 from pyspark.sql import SparkSession
 
@@ -45,6 +51,59 @@ def _build_metadata_configs(
     endpoint_defaults = meta_cfg.get("endpoint") if isinstance(meta_cfg.get("endpoint"), dict) else {}
     service_cfg = MetadataServiceConfig(endpoint_defaults=endpoint_defaults)
     return service_cfg, cache_manager, str(source_id)
+
+
+def _extract_value(source: Any, *keys: str) -> Any:
+    if isinstance(source, Mapping):
+        for key in keys:
+            if key in source:
+                return source[key]
+    for key in keys:
+        if hasattr(source, key):
+            return getattr(source, key)
+    return None
+
+
+def _snapshot_columns_from_payload(payload: Mapping[str, Any]) -> Dict[str, SchemaSnapshotColumn]:
+    columns: Dict[str, SchemaSnapshotColumn] = {}
+    raw_columns: Iterable[Any] = payload.get("schema_fields") or payload.get("columns") or []
+    for entry in raw_columns:
+        name = _extract_value(entry, "name", "column_name")
+        if not name:
+            continue
+        col = SchemaSnapshotColumn(
+            name=str(name),
+            data_type=_extract_value(entry, "data_type", "type", "dataType"),
+            nullable=_extract_value(entry, "nullable"),
+            precision=_extract_value(entry, "precision", "data_precision"),
+            scale=_extract_value(entry, "scale", "data_scale"),
+        )
+        columns[col.name.lower()] = col
+    return columns
+
+
+def _build_schema_snapshot(record) -> Optional[SchemaSnapshot]:
+    if record is None:
+        return None
+    payload = record.payload
+    if isinstance(payload, Mapping):
+        payload_dict: Mapping[str, Any] = payload
+    else:
+        payload_serialized = to_serializable(payload)
+        payload_dict = payload_serialized if isinstance(payload_serialized, Mapping) else {}
+    columns = _snapshot_columns_from_payload(payload_dict)
+    namespace = safe_upper(record.target.namespace)
+    entity = safe_upper(record.target.entity)
+    collected_at = payload_dict.get("collected_at") or payload_dict.get("produced_at")
+    version = record.version or payload_dict.get("version") or payload_dict.get("version_hint")
+    return SchemaSnapshot(
+        namespace=namespace,
+        entity=entity,
+        columns=columns,
+        version=version,
+        collected_at=collected_at,
+        raw=payload,
+    )
 
 
 def collect_metadata(
@@ -114,6 +173,13 @@ class MetadataAccess:
     repository: JsonFileMetadataRepository
     precision_guardrail: Optional[PrecisionGuardrailEvaluator] = None
     guardrail_defaults: Dict[str, Any] = field(default_factory=dict)
+    schema_policy: SchemaDriftPolicy = field(default_factory=SchemaDriftPolicy)
+    schema_validator: SchemaDriftValidator = field(default_factory=SchemaDriftValidator)
+
+    def snapshot_for(self, schema: str, table: str) -> Optional[SchemaSnapshot]:
+        target = MetadataTarget(namespace=safe_upper(schema), entity=safe_upper(table))
+        record = self.repository.latest(target)
+        return _build_schema_snapshot(record)
 
 
 def build_metadata_access(cfg: Dict[str, Any], logger: PrintLogger) -> Optional[MetadataAccess]:
@@ -127,9 +193,14 @@ def build_metadata_access(cfg: Dict[str, Any], logger: PrintLogger) -> Optional[
     repository = JsonFileMetadataRepository(cache_manager)
     guardrail = PrecisionGuardrailEvaluator(repository)
     guardrail_defaults = meta_conf.get("guardrails", {})
+    policy_cfg = meta_conf.get("schema_policy") or meta_conf.get("schemaPolicy")
+    schema_policy = SchemaDriftPolicy.from_config(policy_cfg)
+    schema_validator = SchemaDriftValidator(schema_policy)
     return MetadataAccess(
         cache_manager=cache_manager,
         repository=repository,
         precision_guardrail=guardrail,
         guardrail_defaults=guardrail_defaults,
+        schema_policy=schema_policy,
+        schema_validator=schema_validator,
     )

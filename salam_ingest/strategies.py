@@ -2,6 +2,7 @@ import traceback
 from typing import Any, Dict, List, Optional, Protocol
 
 from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
 
 from .common import with_ingest_cols
 from .endpoints.base import (
@@ -17,6 +18,7 @@ from .common import Utils
 from .tools.base import ExecutionTool
 from .events import emit_state_mark, emit_state_watermark, emit_log
 from .events.types import EventCategory, EventType
+from .metadata.schema import SchemaDriftPolicy, SchemaDriftResult, SchemaValidationError
 
 
 class ExecutionContext:
@@ -50,6 +52,116 @@ class ExecutionContext:
         if self.tool is None:
             raise RuntimeError("Execution tool is required for source operations")
         return source.read_slice(lower=slice_info.lower, upper=slice_info.upper)
+
+    def validate_schema(
+        self,
+        *,
+        schema: str,
+        table: str,
+        dataframe: Any,
+        logger,
+        policy_override=None,
+    ):
+        if self.metadata_access is None:
+            return dataframe, None
+        if dataframe is None or not hasattr(dataframe, "schema"):
+            return dataframe, None
+        access = self.metadata_access
+        policy = access.schema_policy.merge(policy_override) if policy_override else access.schema_policy
+        snapshot = access.snapshot_for(schema, table)
+        if snapshot is None:
+            if policy.require_snapshot:
+                result = SchemaDriftResult(snapshot=None)
+                self._log_schema_validation(logger, schema, table, result, "ERROR")
+                raise SchemaValidationError("Metadata snapshot required but not found", result)
+            emit_log(
+                self.emitter,
+                level="INFO",
+                msg="metadata_snapshot_missing",
+                schema=schema,
+                table=table,
+                logger=logger,
+            )
+            return dataframe, None
+        working_df = dataframe
+        try:
+            result = access.schema_validator.validate(
+                snapshot=snapshot,
+                dataframe_schema=getattr(working_df, "schema", None),
+                policy=policy,
+            )
+        except SchemaValidationError as exc:
+            self._log_schema_validation(logger, schema, table, exc.result, "ERROR")
+            result = exc.result
+            if result and result.missing_columns and not policy.allow_missing_columns:
+                working_df = self._extend_missing_columns(working_df, snapshot, result.missing_columns)
+                emit_log(
+                    self.emitter,
+                    level="INFO",
+                    msg="schema_missing_columns_extended",
+                    schema=schema,
+                    table=table,
+                    columns=[snapshot.columns[col].name if col in snapshot.columns else col for col in result.missing_columns],
+                    logger=logger,
+                )
+                adjusted_policy = policy.clone_with(allow_missing_columns=True)
+                result = access.schema_validator.validate(
+                    snapshot=snapshot,
+                    dataframe_schema=getattr(working_df, "schema", None),
+                    policy=adjusted_policy,
+                )
+            else:
+                raise
+        if result is None:
+            return working_df, None
+        level = "INFO"
+        if result.new_columns or result.missing_columns or result.type_mismatches:
+            level = "WARN"
+        self._log_schema_validation(logger, schema, table, result, level)
+        return working_df, result
+
+    def _log_schema_validation(self, logger, schema: str, table: str, result: SchemaDriftResult, level: str) -> None:
+        if result is None:
+            return
+        payload: Dict[str, Any] = {
+            "schema": schema,
+            "table": table,
+            "status": "ok" if level == "INFO" else "drift",
+        }
+        snapshot = result.snapshot
+        if snapshot is not None:
+            if snapshot.version:
+                payload["snapshot_version"] = snapshot.version
+            if snapshot.collected_at:
+                payload["snapshot_collected_at"] = snapshot.collected_at
+        if result.new_columns:
+            payload["new_columns"] = result.new_columns
+        if result.missing_columns:
+            payload["missing_columns"] = result.missing_columns
+            if result.type_mismatches:
+                payload["type_mismatches"] = [
+                    f"{item.get('column')}:{item.get('expected')}->{item.get('observed')}" for item in result.type_mismatches
+                ]
+        emit_log(self.emitter, level=level, msg="schema_validation", logger=logger, **payload)
+
+    def _extend_missing_columns(self, dataframe: Any, snapshot, missing_cols: List[str]) -> Any:
+        if dataframe is None or not hasattr(dataframe, "withColumn"):
+            return dataframe
+        existing_lower = {col.lower() for col in getattr(dataframe, "columns", []) or []}
+        df = dataframe
+        for key in missing_cols:
+            snapshot_col = snapshot.columns.get(key)
+            col_name = snapshot_col.name if snapshot_col is not None else key
+            if col_name.lower() in existing_lower:
+                continue
+            try:
+                lit_expr = F.lit(None)
+            except Exception:  # pragma: no cover - fallback for stubbed Spark
+                lit_expr = None
+            df = df.withColumn(col_name, lit_expr)
+            existing_lower.add(col_name.lower())
+        return df
+
 class Strategy(Protocol):
     mode: str
 
@@ -147,7 +259,9 @@ class FullRefreshStrategy:
             result = {"table": f"{schema}.{table}", "mode": "full", "raw": raw_dir}
             rows = None
         else:
-            df = with_ingest_cols(context.read_full(source_endpoint))
+            source_df = context.read_full(source_endpoint)
+            source_df, _ = context.validate_schema(schema=schema, table=table, dataframe=source_df, logger=logger)
+            df = with_ingest_cols(source_df)
             rows = df.count()
             emit_state_mark(
                 context,
@@ -352,8 +466,13 @@ class Scd1Strategy:
         )
 
         staged_results: List[SliceStageResult] = []
+        schema_validated = False
         for slice_obj in ingestion_slices:
-            df_slice = with_ingest_cols(context.read_slice(source_endpoint, slice_obj))
+            df_slice_raw = context.read_slice(source_endpoint, slice_obj)
+            if not schema_validated:
+                df_slice_raw, _ = context.validate_schema(schema=schema, table=table, dataframe=df_slice_raw, logger=logger)
+                schema_validated = True
+            df_slice = with_ingest_cols(df_slice_raw)
             stage_result = sink_endpoint.stage_incremental_slice(
                 df_slice,
                 context=incremental_ctx,

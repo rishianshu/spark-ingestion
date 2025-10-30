@@ -9,11 +9,39 @@
     "default_num_partitions": 8
   },
   "runtime": {
+    "orchestration": {
+      "mode": "temporal",
+      "temporal": {
+        "namespace": "ingestion-prod",
+        "task_queue": "spark-ingest",
+        "workflow": "IngestionWorkflow",
+        "workflow_id": "miniboss_ingest",
+        "command": [
+          "python",
+          "ingestion.py",
+          "--config",
+          "conf/miniboss_bss.json"
+        ],
+        "retry_policy": {
+          "initial_interval_seconds": 60,
+          "maximum_interval_seconds": 900,
+          "maximum_attempts": 5
+        },
+        "schedule": {
+          "cron": "0 0 * * *",
+          "timezone": "Asia/Kolkata",
+          "catchup_window": "24h"
+        },
+        "alerts": {
+          "webhook": "https://hooks.slack.com/services/..."
+        }
+      }
+    },
     "job_name": "miniboss_bss",
     "dynamicAllocation": false,
     "initialExecutors": 2,
-    "raw_root": "hdfs:///datalake/miniboss_oss/raw",
-    "final_root": "hdfs:///datalake/miniboss_oss/final",
+    "raw_root": "hdfs:///datalake/prod_dl/miniboss_bss/raw",
+    "final_root": "hdfs:///datalake/prod_dl/miniboss_bss/final",
     "timezone": "Asia/Kolkata",
     "append_table_schema": false,
     "max_parallel_tables": 4,
@@ -21,7 +49,7 @@
     "compression": "snappy",
     "finalize_full_refresh": true,
     "finalize_strategy": "copy_and_swap_final",
-    "hive": { "enabled": true, "db": "miniboss_dl_bss" },
+    "hive": { "enabled": true, "db": "miniboss_bss" },
 
     "state_backend": "singlestore",
     "state_flush": {
@@ -38,11 +66,11 @@
         "database": "monitoring2",
         "eventsTable": "control_etl_events",
         "watermarksTable": "control_watermarks",
-        "sourceId": "miniboss-bss-datalake"
+        "sourceId": "miniboss-bss-prod-dl"
       }
     },
     "staging": {
-      "root": "hdfs:///datalake/_staging_slices",
+      "root": "hdfs:///datalake/prod_dl/miniboss_bss_staging_slices",
       "ttl_hours": 72,
       "enabled": true
     },
@@ -57,19 +85,21 @@
       "enabled": true,
       "type": "iceberg",
       "_type_options": "iceberg | parquet",
-      "catalog": "ice",
-      "db": "staging",
-      "warehouse": "hdfs:///datalake/miniboss_oss/intermediate/iceberg"
+      "catalog": "ice_hive",
+      "catalog_type": "hive",
+      "metastore_uri": "thrift://ruh-bdcldp01.itc.local:9083,thrift://ruh-bdcldp03.itc.local:9083",
+      "db": "miniboss_bss",
+      "warehouse": "hdfs:///datalake/prod_dl/miniboss_bss/intermediate/iceberg"
     },
     "final_parquet_mirror": {
-      "enabled": true,
-      "root": "hdfs:///datalake/miniboss_oss/final_parquet",
+      "enabled": false,
+      "root": "hdfs:///datalake/prod_dl/miniboss_bss/final_parquet",
       "partition_col": "load_date"
     },
     "hive_reg": {
       "doc": "Used for SCD1 Final",
-      "enabled": true,
-      "db": "miniboss_dl_oss",
+      "enabled": false,
+      "db": "miniboss_bss",
       "partition_col": "load_date",
       "use_msck": false
     },

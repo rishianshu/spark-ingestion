@@ -188,8 +188,12 @@ class SingleStoreState(StateStore):
         )
 
     def get_day_status(self, schema: str, table: str, load_date: str) -> Dict[str, bool]:
-        df = self._read_events_df().where(
-            (col("schema_name") == schema) & (col("table_name") == table) & (col("load_date") == lit(load_date))
+        df = (
+            self._read_events_df()
+            .where(col("sourceId") == lit(self.sourceId))
+            .where(col("schema_name") == schema)
+            .where(col("table_name") == table)
+            .where(col("load_date") == to_date(lit(load_date)))
         )
 
         def _done(phase: str) -> bool:
@@ -253,7 +257,12 @@ class SingleStoreState(StateStore):
 
     def get_last_watermark(self, schema: str, table: str, default_value: str) -> str:
         try:
-            df = self._read_wm_df().where((col("schema_name") == schema) & (col("table_name") == table))
+            df = (
+                self._read_wm_df()
+                .where(col("sourceId") == lit(self.sourceId))
+                .where(col("schema_name") == schema)
+                .where(col("table_name") == table)
+            )
             if df.rdd.isEmpty():
                 return default_value
             cols = df.columns
@@ -270,7 +279,12 @@ class SingleStoreState(StateStore):
         self, schema: str, table: str, default_wm: str, default_date: str
     ) -> Tuple[str, str]:
         try:
-            df = self._read_wm_df().where((col("schema_name") == schema) & (col("table_name") == table))
+            df = (
+                self._read_wm_df()
+                .where(col("sourceId") == lit(self.sourceId))
+                .where(col("schema_name") == schema)
+                .where(col("table_name") == table)
+            )
             if df.rdd.isEmpty():
                 return default_wm, default_date
             cols = df.columns

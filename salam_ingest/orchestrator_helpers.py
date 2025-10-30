@@ -35,6 +35,54 @@ def validate_config(cfg: Dict[str, Any]) -> None:
         for key in required:
             if key not in ss:
                 raise ValueError(f"Missing singlestore.{key}")
+    metadata_cfg = cfg.get("metadata")
+    if metadata_cfg is not None and not isinstance(metadata_cfg, dict):
+        raise ValueError("metadata must be an object when provided")
+    if isinstance(metadata_cfg, dict):
+        policy_cfg = metadata_cfg.get("schema_policy") or metadata_cfg.get("schemaPolicy")
+        if policy_cfg is not None and not isinstance(policy_cfg, dict):
+            raise ValueError("metadata.schema_policy must be an object when provided")
+        if policy_cfg:
+            ignored_cols = policy_cfg.get("ignored_columns") or policy_cfg.get("ignoredColumns")
+            if ignored_cols is not None and not isinstance(ignored_cols, (list, tuple, set, str)):
+                raise ValueError("metadata.schema_policy.ignored_columns must be a list or string")
+
+    orchestration_cfg = runtime.get("orchestration")
+    if orchestration_cfg is not None and not isinstance(orchestration_cfg, dict):
+        raise ValueError("runtime.orchestration must be an object when provided")
+    if isinstance(orchestration_cfg, dict):
+        mode = str(orchestration_cfg.get("mode", "plain_cron")).lower()
+        allowed_modes = {"plain_cron", "external_scheduler", "temporal", "informatica", "airflow"}
+        if mode not in allowed_modes:
+            raise ValueError(f"Unsupported orchestration mode: {mode}")
+        if mode == "plain_cron":
+            cron_cfg = orchestration_cfg.get("cron", {})
+            if cron_cfg and not isinstance(cron_cfg, dict):
+                raise ValueError("runtime.orchestration.cron must be an object")
+        if mode in {"external_scheduler", "informatica", "airflow"}:
+            external_cfg = orchestration_cfg.get("external", {})
+            if external_cfg and not isinstance(external_cfg, dict):
+                raise ValueError("runtime.orchestration.external must be an object")
+        if mode == "temporal":
+            temporal_cfg = orchestration_cfg.get("temporal", {})
+            if not isinstance(temporal_cfg, dict):
+                raise ValueError("runtime.orchestration.temporal must be an object")
+            required = ["namespace", "task_queue", "workflow"]
+            missing = [key for key in required if not temporal_cfg.get(key)]
+            if missing:
+                raise ValueError(f"runtime.orchestration.temporal missing keys: {', '.join(missing)}")
+
+    inter_cfg = runtime.get("intermediate", {})
+    if inter_cfg.get("enabled"):
+        if "catalog" not in inter_cfg:
+            raise ValueError("runtime.intermediate.catalog required when intermediate.enabled is true")
+        catalog_type = str(inter_cfg.get("catalog_type", "hadoop")).lower()
+        if catalog_type not in {"hadoop", "hive"}:
+            raise ValueError("runtime.intermediate.catalog_type must be 'hadoop' or 'hive'")
+        if catalog_type == "hadoop" and not inter_cfg.get("warehouse"):
+            raise ValueError("runtime.intermediate.warehouse required for hadoop catalogs")
+        if catalog_type == "hive" and not inter_cfg.get("metastore_uri"):
+            raise ValueError("runtime.intermediate.metastore_uri required for hive catalogs")
 
 
 def suggest_singlestore_ddl(logger, cfg: Dict[str, Any]) -> None:

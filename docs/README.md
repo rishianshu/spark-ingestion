@@ -9,6 +9,7 @@ ingestion.py            # Entry point for spark-submit / pyspark
 salam_ingest/           # Library code (endpoints, tools, planning, state, etc.)
 conf/                   # Example configuration files
 db/                     # DDL definitions and migrations for state stores
+docs/                   # Reference documentation (orchestration, metadata, features)
 scripts/                # Utility scripts (packaging, flattening)
 dist/                   # Build artefacts (created on demand)
 ```
@@ -100,5 +101,7 @@ The flattened file preserves module separators as comments. It is intended for q
 - Endpoints encapsulate source/sink semantics, while execution tools only know how to talk to the underlying system (Spark today, others later).
 - All monitoring flows through the event emitter (`salam_ingest/events`), making it easy to add new subscribers (state store, logging, adaptive planners, etc.).
 - Metadata related to profiling or catalogues will be emitted separately and persisted via a lightweight SQLite repository (coming soon).
+- Orchestration guidance lives in `docs/orchestration/README.md`. Use `python ingestion.py --dump-orchestration-plan --config <cfg>` to preview cron, external scheduler, or Temporal deployment templates.
+- Iceberg incremental runs now target a single Hive-backed catalog (`runtime.intermediate.catalog_type: "hive"`), so Hive/Impala see schema updates automatically.
 
 Feel free to open issues or PRs with enhancements or additional connectors.

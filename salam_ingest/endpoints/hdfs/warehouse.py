@@ -189,10 +189,30 @@ class IcebergHelper:
         cat = inter["catalog"]
         if spark.conf.get(f"spark.sql.catalog.{cat}", None):
             return
-        wh = inter["warehouse"]
+        catalog_type = inter.get("catalog_type", "hadoop").lower()
         spark.conf.set(f"spark.sql.catalog.{cat}", "org.apache.iceberg.spark.SparkCatalog")
-        spark.conf.set(f"spark.sql.catalog.{cat}.type", "hadoop")
-        spark.conf.set(f"spark.sql.catalog.{cat}.warehouse", wh)
+        if catalog_type == "hive":
+            uri = inter.get("metastore_uri")
+            if not uri:
+                try:
+                    uri = spark.sparkContext._jsc.hadoopConfiguration().get("hive.metastore.uris")
+                except Exception:
+                    uri = None
+            if not uri:
+                raise ValueError(
+                    "Iceberg Hive catalog requires metastore URI. Set runtime.intermediate.metastore_uri or hive.metastore.uris."
+                )
+            spark.conf.set(f"spark.sql.catalog.{cat}.type", "hive")
+            spark.conf.set(f"spark.sql.catalog.{cat}.uri", uri)
+            warehouse = inter.get("warehouse")
+            if warehouse:
+                spark.conf.set(f"spark.sql.catalog.{cat}.warehouse", warehouse)
+        else:
+            warehouse = inter.get("warehouse")
+            if not warehouse:
+                raise ValueError("Hadoop catalog configuration requires runtime.intermediate.warehouse")
+            spark.conf.set(f"spark.sql.catalog.{cat}.type", "hadoop")
+            spark.conf.set(f"spark.sql.catalog.{cat}.warehouse", warehouse)
         spark.conf.set(f"spark.sql.catalog.{cat}.case-sensitive", "true")
 
     @staticmethod
@@ -210,8 +230,13 @@ class IcebergHelper:
         full = f"{cat}.{db}.{tbl_ident}"
         spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {cat}.{db}")
         cols = ", ".join([f"`{c}` {df.schema[c].dataType.simpleString()}" for c in df.columns])
+        warehouse = inter.get("warehouse")
+        location_clause = ""
+        if warehouse:
+            table_path = f"{warehouse.rstrip('/')}/{db}/{tbl_ident}"
+            location_clause = f" LOCATION '{table_path}'"
         spark.sql(
-            f"CREATE TABLE IF NOT EXISTS {full} ({cols}) USING iceberg PARTITIONED BY ({partition_col})"
+            f"CREATE TABLE IF NOT EXISTS {full} ({cols}) USING iceberg PARTITIONED BY ({partition_col}){location_clause}"
         )
         return full
 
@@ -267,6 +292,13 @@ class IcebergHelper:
                 raise last_exc
             raise AnalysisException(f"Unable to read schema for table {tgt}")
         tgt_cols = [f.name for f in tgt_schema.fields]
+        new_fields = [
+            field for field in df_src.schema.fields if getattr(field, "name", None) not in tgt_cols
+        ]
+        if new_fields:
+            IcebergHelper.add_missing_columns(spark, cfg, schema, table, new_fields)
+            tgt_schema = spark.table(tgt).schema
+            tgt_cols = [f.name for f in tgt_schema.fields]
         for c in tgt_cols:
             if c not in df_src.columns:
                 df_src = df_src.withColumn(c, F.lit(None).cast("string"))
@@ -288,6 +320,30 @@ class IcebergHelper:
         merge_sql += f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})"
         spark.sql(merge_sql)
         return tgt
+
+    @staticmethod
+    def add_missing_columns(
+        spark: SparkSession,
+        cfg: Dict[str, Any],
+        schema: str,
+        table: str,
+        fields: Sequence[Any],
+    ) -> None:
+        inter = cfg["runtime"]["intermediate"]
+        cat, db = inter["catalog"], inter["db"]
+        tbl_ident = IcebergHelper._identifier(schema, table)
+        tgt = f"{cat}.{db}.{tbl_ident}"
+        for field in fields:
+            name = getattr(field, "name", None)
+            if not name:
+                continue
+            dtype = getattr(field, "dataType", None)
+            if hasattr(dtype, "simpleString"):
+                spark_type = dtype.simpleString()
+            else:
+                spark_type = str(dtype)
+            spark.sql(f"ALTER TABLE {tgt} ADD COLUMN `{name}` {spark_type}")
+
 
     @staticmethod
     def mirror_to_parquet_for_date(
