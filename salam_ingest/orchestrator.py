@@ -27,6 +27,7 @@ from .tools.spark import SparkTool
 from .staging import Staging
 from .metadata import collect_metadata, build_metadata_access
 from .ingestion import run_ingestion
+from .orchestration import build_orchestration_plan
 
 def main(
     tool: ExecutionTool,
@@ -107,6 +108,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--heartbeat-seconds", type=int, default=120)
     parser.add_argument("--notify-interval-seconds", type=int, default=300)
+    parser.add_argument(
+        "--dump-orchestration-plan",
+        action="store_true",
+        help="Print the orchestration plan derived from runtime configuration and exit",
+    )
     return parser.parse_args(argv)
 
 
@@ -115,6 +121,10 @@ def run_cli(argv: Optional[List[str]] = None) -> None:
     with open(args.config, "r", encoding="utf-8") as handle:
         cfg = json.load(handle)
     validate_config(cfg)
+    if getattr(args, "dump_orchestration_plan", False):
+        plan = build_orchestration_plan(cfg, argv)
+        print(plan.to_json())
+        return
     logger = PrintLogger(job_name=cfg["runtime"].get("job_name", "spark_ingest"), file_path=cfg["runtime"].get("log_file"))
     suggest_singlestore_ddl(logger, cfg)
     tool = SparkTool.from_config(cfg)
