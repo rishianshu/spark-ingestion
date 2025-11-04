@@ -74,7 +74,11 @@ class Staging:
             now_ms = now_epoch_ms or int(time.time() * 1000)
 
             def list_dirs(p):
-                for st in fs.listStatus(p):
+                try:
+                    statuses = fs.listStatus(p)
+                except Exception:
+                    return
+                for st in statuses:
                     if st.isDirectory():
                         yield st.getPath()
                         yield from list_dirs(st.getPath())
@@ -84,7 +88,11 @@ class Staging:
                 if dstr.endswith("/slices") or "/slices/" not in dstr:
                     continue
                 if Staging.exists(spark, f"{dstr}/_SUCCESS") and Staging.exists(spark, f"{dstr}/_LANDED"):
-                    age = now_ms - fs.getFileStatus(d).getModificationTime()
+                    try:
+                        status = fs.getFileStatus(d)
+                    except Exception:
+                        continue
+                    age = now_ms - status.getModificationTime()
                     if age > ttl_ms:
                         emit_log(None, level="INFO", msg="staging_ttl_delete", path=dstr, logger=logger)
                         fs.delete(d, True)

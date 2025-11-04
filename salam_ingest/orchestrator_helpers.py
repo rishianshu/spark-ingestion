@@ -12,6 +12,81 @@ from .state import BufferedState, SingleStoreState
 
 
 def validate_config(cfg: Dict[str, Any]) -> None:
+    def _validate_source_filter(table_cfg: Dict[str, Any]) -> None:
+        filt = table_cfg.get("source_filter")
+        if filt is None:
+            return
+        if isinstance(filt, str):
+            return
+        if isinstance(filt, (list, tuple)):
+            if not all(isinstance(item, str) for item in filt):
+                raise ValueError("tables[].source_filter entries must be strings")
+            return
+        raise ValueError("tables[].source_filter must be a string or list of strings")
+
+    def _validate_partition_spec_entries(entries: Any, context: str) -> None:
+        if entries is None:
+            return
+        if not isinstance(entries, list):
+            raise ValueError(f"{context}.spec must be a list when provided")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError(f"{context}.spec entries must be objects")
+            field = entry.get("field")
+            if not field or not isinstance(field, str):
+                raise ValueError(f"{context}.spec entries require a string 'field'")
+            transform = entry.get("transform", "identity")
+            if not isinstance(transform, str):
+                raise ValueError(f"{context}.spec.transform must be a string")
+            norm = transform.lower()
+            base = norm.split(":", 1)[0]
+            allowed = {
+                "identity",
+                "year",
+                "years",
+                "month",
+                "months",
+                "day",
+                "days",
+                "bucket",
+                "truncate",
+            }
+            if base not in allowed:
+                raise ValueError(f"Unsupported partition transform '{transform}' in {context}")
+            if base in {"bucket", "truncate"}:
+                if ":" not in norm:
+                    raise ValueError(f"{context}.spec.transform '{transform}' must include a parameter (e.g. bucket:16)")
+                param = norm.split(":", 1)[1]
+                if not param or not param.isdigit():
+                    raise ValueError(f"{context}.spec.transform '{transform}' parameter must be an integer")
+
+    def _validate_derived_columns(entries: Any, context: str) -> None:
+        if entries is None:
+            return
+        if not isinstance(entries, list):
+            raise ValueError(f"{context}.derived_columns must be a list when provided")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError(f"{context}.derived_columns entries must be objects")
+            name = entry.get("name")
+            expr = entry.get("expr")
+            if not name or not isinstance(name, str):
+                raise ValueError(f"{context}.derived_columns entries require a string 'name'")
+            if not expr or not isinstance(expr, str):
+                raise ValueError(f"{context}.derived_columns entries require a string 'expr'")
+
+    def _validate_merge_filter(entry: Any, context: str) -> None:
+        if entry is None:
+            return
+        if isinstance(entry, str):
+            return
+        if isinstance(entry, dict):
+            expr = entry.get("expr")
+            if expr is None or not isinstance(expr, str):
+                raise ValueError(f"{context}.merge_filter.expr must be a string")
+            return
+        raise ValueError(f"{context}.merge_filter must be a string or object with an 'expr' field")
+
     for key in ["jdbc", "runtime", "tables"]:
         if key not in cfg:
             raise ValueError(f"Missing config key: {key}")
@@ -83,6 +158,32 @@ def validate_config(cfg: Dict[str, Any]) -> None:
             raise ValueError("runtime.intermediate.warehouse required for hadoop catalogs")
         if catalog_type == "hive" and not inter_cfg.get("metastore_uri"):
             raise ValueError("runtime.intermediate.metastore_uri required for hive catalogs")
+
+    partition_defaults = runtime.get("intermediate", {}).get("partition_defaults")
+    if partition_defaults is not None:
+        if not isinstance(partition_defaults, dict):
+            raise ValueError("runtime.intermediate.partition_defaults must be an object when provided")
+        _validate_partition_spec_entries(partition_defaults.get("spec"), "runtime.intermediate.partition_defaults")
+        _validate_derived_columns(partition_defaults.get("derived_columns"), "runtime.intermediate.partition_defaults")
+        _validate_merge_filter(partition_defaults.get("merge_filter"), "runtime.intermediate.partition_defaults")
+
+    for tbl in cfg.get("tables", []):
+        if not isinstance(tbl, dict):
+            continue
+        _validate_source_filter(tbl)
+        table_intermediate = (tbl.get("intermediate") or {})
+        if table_intermediate and not isinstance(table_intermediate, dict):
+            raise ValueError("tables[].intermediate must be an object when provided")
+        partition_cfg = table_intermediate.get("partition")
+        if partition_cfg is not None:
+            if not isinstance(partition_cfg, dict):
+                raise ValueError("tables[].intermediate.partition must be an object when provided")
+            spec_mode = partition_cfg.get("spec_mode")
+            if spec_mode is not None and str(spec_mode).lower() not in {"append", "replace"}:
+                raise ValueError("tables[].intermediate.partition.spec_mode must be 'append' or 'replace'")
+            _validate_partition_spec_entries(partition_cfg.get("spec"), "tables[].intermediate.partition")
+            _validate_derived_columns(partition_cfg.get("derived_columns"), "tables[].intermediate.partition")
+        _validate_merge_filter(table_intermediate.get("merge_filter"), "tables[].intermediate")
 
 
 def suggest_singlestore_ddl(logger, cfg: Dict[str, Any]) -> None:

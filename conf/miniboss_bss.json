@@ -356,6 +356,15 @@
       "mode": "scd1",
       "primary_keys": ["ORDER_ITEM_ID"],
       "incremental_column": "CREATED_DATE",
+      "intermediate": {
+        "partition": {
+          "spec_mode": "replace",
+          "spec": [{ "field": "CREATED_DATE", "transform": "month" }]
+        },
+        "merge_filter": {
+          "expr": "CREATED_DATE >= add_months(current_date(), -2)"
+        }
+      },
       "initial_watermark": "1900-01-01 00:00:00"
     },
     {
@@ -396,6 +405,15 @@
       "mode": "scd1",
       "primary_keys": ["WORK_ORDER_ID"],
       "incremental_column": "CREATED_DATE",
+      "intermediate": {
+        "partition": {
+          "spec_mode": "replace",
+          "spec": [{ "field": "CREATED_DATE", "transform": "month" }]
+        },
+        "merge_filter": {
+          "expr": "CREATED_DATE >= add_months(current_date(), -1)"
+        }
+      },
       "initial_watermark": "1900-01-01 00:00:00"
     },
     {
@@ -420,6 +438,15 @@
       "mode": "scd1",
       "primary_keys": ["EVENT_INST_ID", "PRICE_ID", "SEQ", "DEDUCT_SEQ"],
       "incremental_column": "CREATED_DATE",
+      "intermediate": {
+        "partition": {
+          "spec_mode": "replace",
+          "spec": [{ "field": "CREATED_DATE", "transform": "month" }]
+        },
+        "merge_filter": {
+          "expr": "CREATED_DATE >= add_months(current_date(), -2)"
+        }
+      },
       "initial_watermark": "1900-01-01 00:00:00"
     },
     {
@@ -428,6 +455,15 @@
       "mode": "scd1",
       "primary_keys": ["PROD_ID", "SEQ"],
       "incremental_column": "REC_CREATED_DATE",
+      "intermediate": {
+        "partition": {
+          "spec_mode": "replace",
+          "spec": [{ "field": "REC_CREATED_DATE", "transform": "month" }]
+        },
+        "merge_filter": {
+          "expr": "REC_CREATED_DATE >= add_months(current_date(), -1)"
+        }
+      },
       "initial_watermark": "1900-01-01 00:00:00"
     },
     {
@@ -460,6 +496,15 @@
       "mode": "scd1",
       "primary_keys": ["ORDER_ITEM_MEMO_ID"],
       "incremental_column": "CREATED_DATE",
+      "intermediate": {
+        "partition": {
+          "spec_mode": "replace",
+          "spec": [{ "field": "CREATED_DATE", "transform": "month" }]
+        },
+        "merge_filter": {
+          "expr": "CREATED_DATE >= add_months(current_date(), -2)"
+        }
+      },
       "initial_watermark": "1900-01-01 00:00:00"
     },
     {
@@ -492,6 +537,15 @@
       "mode": "scd1",
       "primary_keys": ["INVOICE_NBR"],
       "incremental_column": "CREATED_DATE",
+      "intermediate": {
+        "partition": {
+          "spec_mode": "replace",
+          "spec": [{ "field": "CREATED_DATE", "transform": "month" }]
+        },
+        "merge_filter": {
+          "expr": "CREATED_DATE >= add_months(current_date(), -1)"
+        }
+      },
       "initial_watermark": "1900-01-01 00:00:00"
     },
     {
@@ -525,6 +579,15 @@
       "mode": "scd1",
       "primary_keys": ["PAYMENT_ID"],
       "incremental_column": "CREATED_DATE",
+      "intermediate": {
+        "partition": {
+          "spec_mode": "replace",
+          "spec": [{ "field": "CREATED_DATE", "transform": "month" }]
+        },
+        "merge_filter": {
+          "expr": "CREATED_DATE >= add_months(current_date(), -2)"
+        }
+      },
       "initial_watermark": "1900-01-01 00:00:00"
     },
     {
@@ -582,6 +645,15 @@
       "mode": "scd1",
       "primary_keys": ["EVENT_PAYMENT_ID"],
       "incremental_column": "CREATED_DATE",
+      "intermediate": {
+        "partition": {
+          "spec_mode": "replace",
+          "spec": [{ "field": "CREATED_DATE", "transform": "month" }]
+        },
+        "merge_filter": {
+          "expr": "CREATED_DATE >= add_months(current_date(), -2)"
+        }
+      },
       "initial_watermark": "1900-01-01 00:00:00"
     }
   ]

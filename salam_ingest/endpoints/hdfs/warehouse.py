@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Any, Dict, Optional, Sequence, Tuple
+import re
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import StructType
+from pyspark.sql.types import NullType
 from pyspark.sql.utils import AnalysisException, ParseException
 from pyspark.sql.window import Window as W
 
@@ -216,6 +218,239 @@ class IcebergHelper:
         spark.conf.set(f"spark.sql.catalog.{cat}.case-sensitive", "true")
 
     @staticmethod
+    def ensure_namespace(spark: SparkSession, cfg: Dict[str, Any]) -> None:
+        inter = cfg["runtime"]["intermediate"]
+        cat = inter.get("catalog")
+        db = inter.get("db")
+        if not cat or not db:
+            return
+        namespace_parts = [cat, *IcebergHelper._namespace_parts(db)]
+        namespace_stmt = ".".join(
+            IcebergHelper._format_part(part, force_quotes=(idx > 0))
+            for idx, part in enumerate(namespace_parts)
+        )
+        spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {namespace_stmt}")
+
+    @staticmethod
+    def _drop_legacy_table(
+        spark: SparkSession,
+        cfg: Dict[str, Any],
+        schema: str,
+        table: str,
+    ) -> None:
+        inter = cfg["runtime"]["intermediate"]
+        db = inter.get("db")
+        if not db:
+            return
+        tbl_ident = IcebergHelper._identifier(schema, table)
+        try:
+            spark.sql(f"DROP TABLE IF EXISTS `{db}`.`{tbl_ident}`")
+        except Exception:
+            # Ignore drop failures; creation will surface any remaining errors
+            pass
+
+    @staticmethod
+    def _namespace_parts(namespace: Any) -> List[str]:
+        if namespace is None:
+            return []
+        if isinstance(namespace, (list, tuple)):
+            parts: List[str] = []
+            for entry in namespace:
+                parts.extend(IcebergHelper._namespace_parts(entry))
+            return parts
+        text = str(namespace).strip().replace("`", "")
+        if not text:
+            return []
+        return [segment for segment in text.split(".") if segment]
+
+    @staticmethod
+    def _format_part(part: str, *, force_quotes: bool = False) -> str:
+        if not force_quotes and part.isidentifier() and "." not in part:
+            return part
+        return f"`{part}`"
+
+    @staticmethod
+    def qualified_name(
+        cfg: Dict[str, Any],
+        schema: str,
+        table: str,
+        *,
+        quoted: bool = False,
+    ) -> str:
+        inter = cfg["runtime"]["intermediate"]
+        catalog = str(inter["catalog"])
+        namespace_parts = IcebergHelper._namespace_parts(inter.get("db"))
+        table_part = IcebergHelper._identifier(schema, table)
+        parts = [catalog, *namespace_parts, table_part]
+        formatted: List[str] = []
+        for idx, part in enumerate(parts):
+            force = quoted and (idx > 0 or not part.isidentifier() or "." in part)
+            formatted.append(IcebergHelper._format_part(part, force_quotes=force))
+        return ".".join(formatted)
+
+    @staticmethod
+    def _partition_clause(partition_col: str, partition_cfg: Optional[Dict[str, Any]]) -> str:
+        spec_entries = []
+        if partition_cfg and isinstance(partition_cfg, dict):
+            spec_entries = partition_cfg.get("spec") or []
+        if spec_entries:
+            rendered = [
+                IcebergHelper._render_partition_transform(entry)
+                for entry in spec_entries
+                if isinstance(entry, dict)
+            ]
+            rendered = [item for item in rendered if item]
+            if rendered:
+                return f" PARTITIONED BY ({', '.join(rendered)})"
+        if partition_col:
+            return f" PARTITIONED BY (`{partition_col}`)"
+        return ""
+
+    @staticmethod
+    def _render_partition_transform(entry: Dict[str, Any], *, field_name: Optional[str] = None) -> Optional[str]:
+        field = field_name or entry.get("field")
+        if not field or not isinstance(field, str):
+            return None
+        transform_raw = entry.get("transform", "identity")
+        transform = str(transform_raw).lower() if transform_raw is not None else "identity"
+        base, _, suffix = transform.partition(":")
+        base = base or "identity"
+        needs_quotes = not str(field).isidentifier() or "." in str(field)
+        column_ref = f"`{field}`" if needs_quotes else field
+        if base in {"identity", ""}:
+            return f"identity({column_ref})"
+        if base in {"year", "years"}:
+            return f"years({column_ref})"
+        if base in {"month", "months"}:
+            return f"months({column_ref})"
+        if base in {"day", "days"}:
+            return f"days({column_ref})"
+        if base == "bucket":
+            param = suffix or "16"
+            return f"bucket({param}, {column_ref})"
+        if base == "truncate":
+            param = suffix or "10"
+            return f"truncate({param}, {column_ref})"
+        # Fallback to identity if transform is unknown (should be validated earlier)
+        return f"identity({column_ref})"
+
+    @staticmethod
+    def _qualify_merge_filter(expr: str, schema: StructType) -> Optional[str]:
+        if not expr:
+            return None
+        column_map = {field.name.lower(): field.name for field in schema.fields}
+        pattern = re.compile(r"(?<![\w`\.'])([A-Za-z_][A-Za-z0-9_]*)")
+
+        def replacer(match: re.Match[str]) -> str:
+            token = match.group(1)
+            lookup = column_map.get(token.lower())
+            if lookup is None:
+                return token
+            return f"t.`{lookup}`"
+
+        return pattern.sub(replacer, expr)
+
+    @staticmethod
+    def _current_partition_columns(
+        spark: SparkSession,
+        cfg: Dict[str, Any],
+        schema: str,
+        table: str,
+    ) -> List[str]:
+        qualified = IcebergHelper.qualified_name(cfg, schema, table, quoted=True)
+        rows = spark.sql(f"DESCRIBE EXTENDED {qualified}").collect()
+        columns: List[str] = []
+        capture = False
+        for row in rows:
+            col_name = str(row[0]) if row[0] is not None else ""
+            data_val = str(row[1]) if row[1] is not None else ""
+            if col_name == "# Partitioning":
+                capture = True
+                continue
+            if capture:
+                if not col_name:
+                    break
+                if col_name.startswith("Part "):
+                    cleaned = data_val.strip().strip('"')
+                    if cleaned:
+                        columns.append(cleaned)
+        return columns
+
+    @staticmethod
+    def set_partition_spec(
+        spark: SparkSession,
+        cfg: Dict[str, Any],
+        schema: str,
+        table: str,
+        partition_cfg: Optional[Dict[str, Any]],
+    ) -> bool:
+        if not partition_cfg:
+            return False
+        spec_entries = partition_cfg.get("spec") or []
+        if not spec_entries:
+            return False
+        IcebergHelper.setup_catalog(spark, cfg)
+        full = IcebergHelper.qualified_name(cfg, schema, table, quoted=True)
+        table_schema: Optional[StructType]
+        try:
+            table_schema = spark.table(full).schema
+        except AnalysisException:
+            table_schema = None
+        name_map: Dict[str, str] = {}
+        if table_schema is not None:
+            name_map = {f.name.lower(): f.name for f in table_schema.fields}
+        rendered: List[str] = []
+        normalized_specs: Dict[str, str] = {}
+        for entry in spec_entries:
+            if not isinstance(entry, dict):
+                continue
+            raw_field = entry.get("field")
+            if not isinstance(raw_field, str):
+                continue
+            actual_field = name_map.get(raw_field.lower(), raw_field)
+            spec_str = IcebergHelper._render_partition_transform(entry, field_name=actual_field)
+            if spec_str is None:
+                continue
+            rendered.append(spec_str)
+            inner = spec_str.split("(", 1)[1].rsplit(")", 1)[0]
+            col_arg = inner.split(",")[-1].strip().strip("`")
+            normalized_specs[col_arg] = spec_str
+        if not rendered:
+            return False
+        current_cols = IcebergHelper._current_partition_columns(spark, cfg, schema, table)
+
+        changed = False
+        for col in current_cols:
+            if col not in normalized_specs:
+                spark.sql(f"ALTER TABLE {full} DROP PARTITION FIELD {col}")
+                changed = True
+
+        for col, spec in normalized_specs.items():
+            if col in current_cols:
+                spark.sql(f"ALTER TABLE {full} REPLACE PARTITION FIELD {col} WITH {spec}")
+            else:
+                spark.sql(f"ALTER TABLE {full} ADD PARTITION FIELD {spec}")
+            changed = True
+
+        return changed
+
+    @staticmethod
+    def rewrite_data_files(
+        spark: SparkSession,
+        cfg: Dict[str, Any],
+        schema: str,
+        table: str,
+    ) -> None:
+        inter = cfg["runtime"]["intermediate"]
+        cat = inter["catalog"]
+        namespace = IcebergHelper._namespace_parts(inter.get("db"))
+        tbl_ident = IcebergHelper._identifier(schema, table)
+        namespace_literal = ".".join(namespace + [tbl_ident]) if namespace else tbl_ident
+        spark.sql(
+            f"CALL {cat}.system.rewrite_data_files(table => '{namespace_literal}')"
+        )
+
+    @staticmethod
     def ensure_table(
         spark: SparkSession,
         cfg: Dict[str, Any],
@@ -223,21 +458,48 @@ class IcebergHelper:
         table: str,
         df: DataFrame,
         partition_col: str,
+        partition_cfg: Optional[Dict[str, Any]] = None,
+        merge_filter_expr: Optional[str] = None,
     ) -> str:
         inter = cfg["runtime"]["intermediate"]
         cat, db = inter["catalog"], inter["db"]
         tbl_ident = IcebergHelper._identifier(schema, table)
-        full = f"{cat}.{db}.{tbl_ident}"
-        spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {cat}.{db}")
+        full = IcebergHelper.qualified_name(cfg, schema, table, quoted=True)
+        IcebergHelper.ensure_namespace(spark, cfg)
+        table_is_ready = False
+        try:
+            spark.table(full)
+            table_is_ready = True
+        except Exception as exc:
+            message = str(exc)
+            if "Not an iceberg table" in message or "not an iceberg table" in message.lower():
+                IcebergHelper._drop_legacy_table(spark, cfg, schema, table)
+            else:
+                lowered = message.lower()
+                if "not found" in lowered or "table or view not found" in lowered or "no such table" in lowered:
+                    pass
+                else:
+                    # For other failures we surface the exception to callers
+                    raise
+        if table_is_ready:
+            return full
         cols = ", ".join([f"`{c}` {df.schema[c].dataType.simpleString()}" for c in df.columns])
         warehouse = inter.get("warehouse")
         location_clause = ""
         if warehouse:
             table_path = f"{warehouse.rstrip('/')}/{db}/{tbl_ident}"
             location_clause = f" LOCATION '{table_path}'"
-        spark.sql(
-            f"CREATE TABLE IF NOT EXISTS {full} ({cols}) USING iceberg PARTITIONED BY ({partition_col}){location_clause}"
-        )
+        partition_clause = IcebergHelper._partition_clause(partition_col, partition_cfg)
+        create_stmt = f"CREATE TABLE IF NOT EXISTS {full} ({cols}) USING iceberg{partition_clause}{location_clause}"
+        try:
+            spark.sql(create_stmt)
+        except Exception as exc:
+            message = str(exc)
+            if "Not an iceberg table" in message or "not an iceberg table" in message.lower():
+                IcebergHelper._drop_legacy_table(spark, cfg, schema, table)
+                spark.sql(create_stmt)
+            else:
+                raise
         return full
 
     @staticmethod
@@ -264,18 +526,20 @@ class IcebergHelper:
         load_date: str,
         partition_col: str = "load_date",
         incr_col: Optional[str] = None,
+        partition_cfg: Optional[Dict[str, Any]] = None,
+        merge_filter_expr: Optional[str] = None,
     ) -> str:
         inter = cfg["runtime"]["intermediate"]
         cat, db = inter["catalog"], inter["db"]
         tbl_ident = IcebergHelper._identifier(schema, table)
-        tgt = f"{cat}.{db}.{tbl_ident}"
+        tgt = IcebergHelper.qualified_name(cfg, schema, table, quoted=True)
         IcebergHelper.setup_catalog(spark, cfg)
         if partition_col not in df_src.columns:
             df_src = df_src.withColumn(partition_col, F.to_date(F.lit(load_date), "yyyy-MM-dd"))
         order_cols = [incr_col] if incr_col else []
         order_cols.append(partition_col)
         df_src = IcebergHelper.dedup(df_src, pk_cols, order_cols)
-        IcebergHelper.ensure_table(spark, cfg, schema, table, df_src, partition_col)
+        IcebergHelper.ensure_table(spark, cfg, schema, table, df_src, partition_col, partition_cfg)
         tgt_schema: Optional[StructType] = None
         last_exc: Optional[Exception] = None
         for attempt in range(5):
@@ -284,7 +548,7 @@ class IcebergHelper:
                 break
             except (AnalysisException, ParseException) as exc:
                 last_exc = exc
-                IcebergHelper.ensure_table(spark, cfg, schema, table, df_src, partition_col)
+                IcebergHelper.ensure_table(spark, cfg, schema, table, df_src, partition_col, partition_cfg)
                 if attempt < 4:
                     time.sleep(0.5)
         if tgt_schema is None:
@@ -292,8 +556,18 @@ class IcebergHelper:
                 raise last_exc
             raise AnalysisException(f"Unable to read schema for table {tgt}")
         tgt_cols = [f.name for f in tgt_schema.fields]
-        new_fields = [
+        new_fields: List[Any] = [
             field for field in df_src.schema.fields if getattr(field, "name", None) not in tgt_cols
+        ]
+        null_fields = [
+            field for field in new_fields
+            if isinstance(getattr(field, "dataType", None), NullType)
+        ]
+        if null_fields:
+            df_src = df_src.drop(*[field.name for field in null_fields if getattr(field, "name", None)])
+        new_fields = [
+            field for field in new_fields
+            if not isinstance(getattr(field, "dataType", None), NullType)
         ]
         if new_fields:
             IcebergHelper.add_missing_columns(spark, cfg, schema, table, new_fields)
@@ -311,6 +585,11 @@ class IcebergHelper:
         src_cols = df_src.columns
         non_pk_cols = [c for c in src_cols if c not in pk_cols and c != partition_col]
         on_clause = " AND ".join([f"t.`{c}` = s.`{c}`" for c in pk_cols])
+        target_predicate = None
+        if merge_filter_expr:
+            target_predicate = IcebergHelper._qualify_merge_filter(merge_filter_expr, tgt_schema)
+        if target_predicate:
+            on_clause = f"{on_clause} AND ({target_predicate})"
         merge_sql = f"MERGE INTO {tgt} t USING {tv} s ON {on_clause} "
         if non_pk_cols:
             set_clause = ", ".join([f"t.`{c}` = s.`{c}`" for c in non_pk_cols])
@@ -329,10 +608,7 @@ class IcebergHelper:
         table: str,
         fields: Sequence[Any],
     ) -> None:
-        inter = cfg["runtime"]["intermediate"]
-        cat, db = inter["catalog"], inter["db"]
-        tbl_ident = IcebergHelper._identifier(schema, table)
-        tgt = f"{cat}.{db}.{tbl_ident}"
+        tgt = IcebergHelper.qualified_name(cfg, schema, table, quoted=True)
         for field in fields:
             name = getattr(field, "name", None)
             if not name:

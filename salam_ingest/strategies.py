@@ -401,7 +401,11 @@ class Scd1Strategy:
         initial_wm = tbl_cfg.get("initial_watermark", "1900-01-01 00:00:00")
         pk_cols = list(tbl_cfg.get("primary_keys", []))
 
-        last_wm, last_ld = state.get_progress(schema, table, default_wm=initial_wm, default_date="1900-01-01")
+        force_reload = bool(tbl_cfg.get("force_reload"))
+        if force_reload:
+            last_wm, last_ld = initial_wm, "1900-01-01"
+        else:
+            last_wm, last_ld = state.get_progress(schema, table, default_wm=initial_wm, default_date="1900-01-01")
         emit_log(
             context.emitter,
             level="INFO",
@@ -411,6 +415,7 @@ class Scd1Strategy:
             wm=last_wm,
             last_ld=last_ld,
             load_date=load_date,
+            reload=force_reload,
             logger=logger,
         )
 

@@ -66,6 +66,7 @@ class JdbcEndpoint(SourceEndpoint):
     # --- SourceEndpoint protocol -------------------------------------------------
     def configure(self, table_cfg: Dict[str, Any]) -> None:  # pragma: no cover
         self.table_cfg.update(table_cfg)
+        self.base_from_sql = self._build_from_sql()
 
     def capabilities(self) -> EndpointCapabilities:
         return self._caps
@@ -81,10 +82,8 @@ class JdbcEndpoint(SourceEndpoint):
 
     def read_full(self) -> Any:
         projection = self._projection_sql()
-        if projection.strip() == "*":
-            dbtable = f"{self.schema}.{self.table}"
-        else:
-            dbtable = f"(SELECT {projection} FROM {self.base_from_sql}) t"
+        predicates = self._source_filters()
+        dbtable = self._select_from_base(projection, predicates)
         options = self._jdbc_options(dbtable=dbtable)
         partition = self._partition_options()
         request = QueryRequest(format="jdbc", options=options, partition_options=partition)
@@ -130,6 +129,24 @@ class JdbcEndpoint(SourceEndpoint):
             "numPartitions": str(partition_cfg.get("numPartitions", self.jdbc_cfg.get("default_num_partitions", 8))),
         }
 
+    def _source_filters(self) -> List[str]:
+        filt = self.table_cfg.get("source_filter")
+        if filt is None:
+            return []
+        if isinstance(filt, str):
+            return [filt] if filt.strip() else []
+        if isinstance(filt, (list, tuple)):
+            return [str(item) for item in filt if isinstance(item, str) and item.strip()]
+        return []
+
+    def _select_from_base(self, projection: str, predicates: List[str]) -> str:
+        select_list = projection or "*"
+        where_clause = ""
+        if predicates:
+            joined = " AND ".join(f"({entry})" for entry in predicates)
+            where_clause = f" WHERE {joined}"
+        return f"(SELECT {select_list} FROM {self.base_from_sql}{where_clause}) t"
+
 
     def _build_from_sql(self) -> str:
         query = self.table_cfg.get("query_sql")
@@ -143,21 +160,24 @@ class JdbcEndpoint(SourceEndpoint):
         col_identifier = self._column_identifier(col) if col else None
         if not col_identifier:
             raise ValueError("incremental column required for count query")
-        predicate = f"{col_identifier} > {self._literal(lower)}"
+        predicates = [f"{col_identifier} > {self._literal(lower)}"]
         if upper is not None:
-            predicate += f" AND {col_identifier} <= {self._literal(upper)}"
-        return f"(SELECT COUNT(1) AS CNT FROM {base} WHERE {predicate}) c"
+            predicates.append(f"{col_identifier} <= {self._literal(upper)}")
+        predicates.extend(self._source_filters())
+        where_clause = " AND ".join(f"({entry})" for entry in predicates)
+        return f"(SELECT COUNT(1) AS CNT FROM {base} WHERE {where_clause}) c"
 
     def _dbtable_for_range(self, lower: str, upper: Optional[str]) -> str:
         col = self.incremental_column
         col_identifier = self._column_identifier(col) if col else None
         if not col_identifier:
             raise ValueError("incremental column required for range query")
-        predicate = f"{col_identifier} > {self._literal(lower)}"
+        predicates = [f"{col_identifier} > {self._literal(lower)}"]
         if upper is not None:
-            predicate += f" AND {col_identifier} <= {self._literal(upper)}"
+            predicates.append(f"{col_identifier} <= {self._literal(upper)}")
+        predicates.extend(self._source_filters())
         projection = self._projection_sql()
-        return f"(SELECT {projection} FROM {self.base_from_sql} WHERE {predicate}) t"
+        return self._select_from_base(projection, predicates)
 
     def _projection_sql(self) -> str:
         guardrail_projection = self._precision_guardrail_projection()

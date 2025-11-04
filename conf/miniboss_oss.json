@@ -166,7 +166,7 @@
     },
     {
       "schema": "itcftth",
-      "table": "om_disp_reason",
+      "table": "oms_disp_reason",
       "mode": "full"
     },
     {
@@ -250,6 +250,15 @@
       "mode": "scd1",
       "primary_keys": ["ORD_NO"],
       "incremental_column": "ARC_DATE",
+      "intermediate": {
+        "partition": {
+          "spec_mode": "replace",
+          "spec": [{ "field": "ARC_DATE", "transform": "month" }]
+        },
+        "merge_filter": {
+          "expr": "ARC_DATE >= add_months(current_date(), -6)"
+        }
+      },
       "initial_watermark": "1900-01-01 00:00:00"
     },
     {
@@ -258,6 +267,15 @@
       "mode": "scd1",
       "primary_keys": ["ORD_NO"],
       "incremental_column": "ARC_DATE",
+      "intermediate": {
+        "partition": {
+          "spec_mode": "replace",
+          "spec": [{ "field": "ARC_DATE", "transform": "month" }]
+        },
+        "merge_filter": {
+          "expr": "ARC_DATE >= add_months(current_date(), -6)"
+        }
+      },
       "initial_watermark": "1900-01-01 00:00:00"
     },
     {
@@ -298,6 +316,15 @@
       "mode": "scd1",
       "primary_keys": ["ORD_NO", "SEQ"],
       "incremental_column": "ARC_DATE",
+      "intermediate": {
+        "partition": {
+          "spec_mode": "replace",
+          "spec": [{ "field": "ARC_DATE", "transform": "month" }]
+        },
+        "merge_filter": {
+          "expr": "ARC_DATE >= add_months(current_date(), -2)"
+        }
+      },
       "initial_watermark": "1900-01-01 00:00:00"
     },
     {
@@ -338,6 +365,15 @@
       "mode": "scd1",
       "primary_keys": ["WO_NO"],
       "incremental_column": "ARC_DATE",
+      "intermediate": {
+        "partition": {
+          "spec_mode": "replace",
+          "spec": [{ "field": "ARC_DATE", "transform": "month" }]
+        },
+        "merge_filter": {
+          "expr": "ARC_DATE >= add_months(current_date(), -6)"
+        }
+      },
       "initial_watermark": "1900-01-01 00:00:00"
     },
     {
@@ -354,6 +390,15 @@
       "mode": "scd1",
       "primary_keys": ["ACCOUNT_ID"],
       "incremental_column": "DATE_TIME",
+      "intermediate": {
+        "partition": {
+          "spec_mode": "replace",
+          "spec": [{ "field": "DATE_TIME", "transform": "month" }]
+        },
+        "merge_filter": {
+          "expr": "DATE_TIME >= add_months(current_date(), -2)"
+        }
+      },
       "initial_watermark": "1900-01-01 00:00:00"
     },
     {
@@ -378,6 +423,15 @@
       "mode": "scd1",
       "primary_keys": ["VER_ID"],
       "incremental_column": "COMMIT_DATE",
+      "intermediate": {
+        "partition": {
+          "spec_mode": "replace",
+          "spec": [{ "field": "COMMIT_DATE", "transform": "month" }]
+        },
+        "merge_filter": {
+          "expr": "COMMIT_DATE >= add_months(current_date(), -6)"
+        }
+      },
       "initial_watermark": "1900-01-01 00:00:00"
     },
     {
