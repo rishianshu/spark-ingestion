@@ -4,11 +4,12 @@ from dataclasses import asdict
 from typing import Any, Dict, List, Optional
 
 from ..tools.base import ExecutionTool, QueryRequest
-from .base import EndpointCapabilities, SourceEndpoint
+from .base import EndpointCapabilities, SourceEndpoint, SupportsQueryExecution
+from salam_ingest.query.plan import QueryPlan, QueryResult, SelectItem
 from ..metadata.core import MetadataTarget
 
 
-class JdbcEndpoint(SourceEndpoint):
+class JdbcEndpoint(SourceEndpoint, SupportsQueryExecution):
     """Generic JDBC endpoint with dialect-specific subclasses."""
 
     DIALECT = "generic"
@@ -102,6 +103,40 @@ class JdbcEndpoint(SourceEndpoint):
         options["fetchsize"] = 1
         request = QueryRequest(format="jdbc", options=options, partition_options=None)
         return int(self.tool.query_scalar(request))
+
+    def execute_query_plan(self, plan: QueryPlan) -> QueryResult:
+        selects = plan.selects or (SelectItem(expression="*"),)
+        select_clause = ", ".join(sel.render() for sel in selects)
+        source_sql = plan.source or self.base_from_sql
+        predicates = list(self._source_filters())
+        predicates.extend(plan.filters)
+        where_clause = ""
+        if predicates:
+            where_clause = " WHERE " + " AND ".join(f"({expr})" for expr in predicates)
+        group_clause = ""
+        if plan.group_by:
+            group_clause = " GROUP BY " + ", ".join(plan.group_by)
+        having_clause = ""
+        if plan.having:
+            having_clause = " HAVING " + " AND ".join(f"({expr})" for expr in plan.having)
+        order_clause = ""
+        if plan.order_by:
+            order_clause = " ORDER BY " + ", ".join(order.render() for order in plan.order_by)
+        limit_clause = ""
+        if plan.limit is not None:
+            limit_clause = f" LIMIT {int(plan.limit)}"
+        sql_core = f"SELECT {select_clause} FROM {source_sql}{where_clause}{group_clause}{having_clause}{order_clause}{limit_clause}"
+        execute_sql = getattr(self.tool, "execute_sql", None)
+        if callable(execute_sql):
+            records = execute_sql(sql_core)
+            return QueryResult.from_records(records)
+        wrapped = f"({sql_core}) q"
+        options = self._jdbc_options(dbtable=wrapped)
+        options["fetchsize"] = max(1, int(options.get("fetchsize", self._caps.default_fetchsize)))
+        request = QueryRequest(format="jdbc", options=options, partition_options=None)
+        df = self.tool.query(request)
+        rows = [row.asDict(recursive=True) for row in df.collect()]
+        return QueryResult.from_records(rows)
 
     # --- Helpers -----------------------------------------------------------------
     def _jdbc_options(self, *, dbtable: str) -> Dict[str, Any]:

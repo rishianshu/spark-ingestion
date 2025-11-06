@@ -1,0 +1,17 @@
+{
+    "schema": "itcftth",
+    "table": "srv_cfsver_ct_main",
+    "mode": "scd1",
+    "primary_keys": ["VER_ID"],
+    "incremental_column": "COMMIT_DATE",
+    "intermediate": {
+      "partition": {
+        "spec_mode": "replace",
+        "spec": [{ "field": "COMMIT_DATE", "transform": "month" }]
+      },
+      "merge_filter": {
+        "expr": "COMMIT_DATE >= add_months(current_date(), -6)"
+      }
+    },
+    "initial_watermark": "1900-01-01 00:00:00"
+  }

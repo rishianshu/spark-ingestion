@@ -71,7 +71,13 @@
       "use_msck": false
     },
     "log_file": "/home/informaticaadmin/etl_monitoring/miniboss_oss_ingest.log",
-    "state_flush_every": 50
+    "state_flush_every": 50,
+    "reconciliation_defaults": {
+      "checks": [
+        { "type": "plain_count", "threshold": { "percent": 1.0, "absolute": 1000 } },
+        { "type": "pk_uniqueness" }
+      ]
+    }
   },
   "tables": [
     {
@@ -346,7 +352,8 @@
     {
       "schema": "itcftth",
       "table": "epcs_spec",
-      "mode": "scd1",
+      "mode": "full",
+      "comment": "MODIFY_DATE has multiple nulls so moving to full-refresh ",
       "primary_keys": ["SPEC_ID"],
       "incremental_column": "MODIFY_DATE",
       "initial_watermark": "1900-01-01 00:00:00"
@@ -415,23 +422,6 @@
       "mode": "scd1",
       "primary_keys": ["CFS_ID", "ATTR_ID", "LAST_VER"],
       "incremental_column": "ARC_DATE",
-      "initial_watermark": "1900-01-01 00:00:00"
-    },
-    {
-      "schema": "itcftth",
-      "table": "srv_cfsver_ct_main",
-      "mode": "scd1",
-      "primary_keys": ["VER_ID"],
-      "incremental_column": "COMMIT_DATE",
-      "intermediate": {
-        "partition": {
-          "spec_mode": "replace",
-          "spec": [{ "field": "COMMIT_DATE", "transform": "month" }]
-        },
-        "merge_filter": {
-          "expr": "COMMIT_DATE >= add_months(current_date(), -6)"
-        }
-      },
       "initial_watermark": "1900-01-01 00:00:00"
     },
     {

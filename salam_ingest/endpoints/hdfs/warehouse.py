@@ -161,6 +161,7 @@ class HiveHelper:
     ) -> None:
         tbl = f"{schema}__{table}"
         if HiveHelper.table_exists(spark, db, tbl):
+            spark.sql(f"REFRESH TABLE `{db}`.`{tbl}`")
             return
         spark.sql(f"CREATE DATABASE IF NOT EXISTS `{db}`")
         df = spark.read.parquet(base_location).limit(1)
@@ -174,6 +175,7 @@ class HiveHelper:
           LOCATION '{base_location}'
         """
         )
+        spark.sql(f"REFRESH TABLE `{db}`.`{tbl}`")
 
 
 class IcebergHelper:

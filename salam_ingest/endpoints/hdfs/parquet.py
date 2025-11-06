@@ -15,6 +15,7 @@ from ...io.paths import Paths
 from ...staging import Staging
 from ..base import (
     EndpointCapabilities,
+    SupportsQueryExecution,
     IncrementalCommitResult,
     IncrementalContext,
     IngestionSlice,
@@ -23,6 +24,7 @@ from ..base import (
     SinkWriteResult,
     SliceStageResult,
 )
+from salam_ingest.query.plan import QueryPlan, QueryResult, SelectItem, OrderItem
 from .warehouse import HiveHelper, IcebergHelper
 
 
@@ -49,7 +51,7 @@ def _load_raw_increment_df(
     return df
 
 
-class HdfsParquetEndpoint(SinkEndpoint):
+class HdfsParquetEndpoint(SinkEndpoint, SupportsQueryExecution):
     """Handles landing to RAW directories and optional Hive registration."""
 
     def __init__(self, spark: SparkSession, cfg: Dict[str, Any], table_cfg: Dict[str, Any]) -> None:
@@ -724,6 +726,38 @@ class HdfsParquetEndpoint(SinkEndpoint):
     def _paths_for(self, load_date: str) -> Tuple[str, str, str]:
         return Paths.build(self.runtime_cfg, self.schema, self.table, load_date)
 
+    def execute_query_plan(self, plan: QueryPlan) -> QueryResult:
+        selects = plan.selects or (SelectItem(expression="*"),)
+        runtime_wrapper = {"runtime": self.runtime_cfg}
+        IcebergHelper.setup_catalog(self.spark, runtime_wrapper)
+        IcebergHelper.ensure_namespace(self.spark, runtime_wrapper)
+        table_name = IcebergHelper.qualified_name(
+            runtime_wrapper,
+            self.schema,
+            self.table,
+            quoted=True,
+        )
+        select_clause = ", ".join(select.render() for select in selects)
+        where_clause = ""
+        if plan.filters:
+            where_clause = " WHERE " + " AND ".join(f"({expr})" for expr in plan.filters)
+        group_clause = ""
+        if plan.group_by:
+            group_clause = " GROUP BY " + ", ".join(plan.group_by)
+        having_clause = ""
+        if plan.having:
+            having_clause = " HAVING " + " AND ".join(f"({expr})" for expr in plan.having)
+        order_clause = ""
+        if plan.order_by:
+            order_clause = " ORDER BY " + ", ".join(order.render() for order in plan.order_by)
+        limit_clause = ""
+        if plan.limit is not None:
+            limit_clause = f" LIMIT {int(plan.limit)}"
+        sql = f"SELECT {select_clause} FROM {table_name}{where_clause}{group_clause}{having_clause}{order_clause}{limit_clause}"
+        df = self.spark.sql(sql)
+        rows = [row.asDict(recursive=True) for row in df.collect()]
+        return QueryResult.from_records(rows)
+
     def rebuild_from_raw(self, *, logger, keep_backup: bool = False) -> Dict[str, Any]:
         inter_cfg = self.runtime_cfg.get("intermediate", {"enabled": False})
         if not inter_cfg.get("enabled", False):
@@ -761,9 +795,29 @@ class HdfsParquetEndpoint(SinkEndpoint):
             chunk_paths = [self.base_raw]
         chunk_paths.sort()
 
+        try:
+            df_raw = self.spark.read.format(read_format).load(chunk_paths)
+        except Exception as exc:  # pragma: no cover - defensive
+            raise RuntimeError(f"raw_read_failed: {exc}") from exc
+        if df_raw.rdd.isEmpty():
+            return {"status": "error", "error": "raw_empty"}
+
+        df_augmented = self._apply_derived_columns(df_raw)
         pk_cols = list(self.table_cfg.get("primary_keys", []))
         incr_col = self.table_cfg.get("incremental_column")
-        total_rows = 0
+        order_cols: List[str] = []
+        if incr_col:
+            order_cols.append(incr_col)
+        if "load_timestamp" in df_augmented.columns:
+            order_cols.append("load_timestamp")
+        if pk_cols:
+            df_clean = IcebergHelper.dedup(df_augmented, pk_cols, order_cols)
+        else:
+            df_clean = df_augmented.dropDuplicates()
+        total_rows = df_clean.count()
+        if total_rows == 0:
+            return {"status": "error", "error": "raw_empty"}
+
         table_initialized = False
         tgt_schema = None
         ident = IcebergHelper._identifier(self.schema, self.table)
@@ -783,46 +837,19 @@ class HdfsParquetEndpoint(SinkEndpoint):
             else:
                 self.spark.sql(f"DROP TABLE IF EXISTS {full_name}")
 
-            for chunk_path in chunk_paths:
-                try:
-                    df_chunk_raw = self.spark.read.format(read_format).load(chunk_path)
-                except Exception as exc:  # pragma: no cover - defensive
-                    raise RuntimeError(f"raw_read_failed: {exc}") from exc
-                if df_chunk_raw.rdd.isEmpty():
-                    continue
-                df_chunk_aug = self._apply_derived_columns(df_chunk_raw)
-                order_cols = []
-                if incr_col:
-                    order_cols.append(incr_col)
-                if "load_timestamp" in df_chunk_aug.columns:
-                    order_cols.append("load_timestamp")
-                if pk_cols:
-                    df_chunk_clean = IcebergHelper.dedup(df_chunk_aug, pk_cols, order_cols)
-                else:
-                    df_chunk_clean = df_chunk_aug
-                rows = df_chunk_clean.count()
-                if rows == 0:
-                    continue
-                if not table_initialized:
-                    IcebergHelper.ensure_table(
-                        self.spark,
-                        {"runtime": self.runtime_cfg},
-                        self.schema,
-                        self.table,
-                        df_chunk_clean,
-                        inter_cfg.get("partition_col", "load_date"),
-                        {"spec": self._partition_spec},
-                    )
-                    tgt_schema = self.spark.table(full_name).schema
-                    table_initialized = True
-                if tgt_schema is None:
-                    tgt_schema = self.spark.table(full_name).schema
-                ordered_cols = [field.name for field in tgt_schema.fields]
-                df_chunk_clean.select([col(c) for c in ordered_cols]).writeTo(full_name).append()
-                total_rows += rows
-
-            if not table_initialized:
-                raise RuntimeError("raw_empty")
+            IcebergHelper.ensure_table(
+                self.spark,
+                {"runtime": self.runtime_cfg},
+                self.schema,
+                self.table,
+                df_clean,
+                inter_cfg.get("partition_col", "load_date"),
+                {"spec": self._partition_spec},
+            )
+            tgt_schema = self.spark.table(full_name).schema
+            ordered_cols = [field.name for field in tgt_schema.fields]
+            df_clean.select([col(c) for c in ordered_cols]).writeTo(full_name).append()
+            table_initialized = True
         except Exception as exc:
             if table_exists:
                 try:

@@ -113,7 +113,16 @@
       "/home/informaticaadmin/jars/spark-mssql-connector_2.12-1.2.0.jar"
     ],
     "log_file": "/home/informaticaadmin/etl_monitoring/miniboss_bss_ingest.log",
-    "state_flush_every": 50
+    "state_flush_every": 50,
+    "reconciliation_defaults": {
+      "checks": [
+        {
+          "type": "plain_count",
+          "threshold": { "percent": 1.0, "absolute": 1000 }
+        },
+        { "type": "pk_uniqueness" }
+      ]
+    }
   },
 
   "tables": [
@@ -618,7 +627,8 @@
     {
       "schema": "cvbs",
       "table": "cust_attr_value",
-      "mode": "scd1",
+      "mode": "full",
+      "comment": "as per prasad comment, moving to full",
       "primary_keys": ["CUST_ID", "ATTR_ID"],
       "incremental_column": "UPDATE_DATE",
       "initial_watermark": "1900-01-01 00:00:00"

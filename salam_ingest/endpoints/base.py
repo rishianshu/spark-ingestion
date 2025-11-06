@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     from pyspark.sql import DataFrame
     from ..metadata.core import CatalogSnapshot
     from ..tools.base import ExecutionTool
+    from salam_ingest.query.plan import QueryPlan, QueryResult
 
 
 class EndpointRole(Enum):
@@ -51,6 +52,24 @@ class BaseEndpoint(Protocol):
     def capabilities(self) -> EndpointCapabilities: ...
 
     def describe(self) -> Dict[str, Any]: ...
+
+
+@runtime_checkable
+class SupportsQueryExecution(Protocol):
+    """Endpoints capable of executing logical query plans."""
+
+    def execute_query_plan(self, plan: "QueryPlan") -> "QueryResult": ...
+
+
+@runtime_checkable
+class SupportsStreamingQuery(Protocol):
+    def stream_query_plan(self, plan: "QueryPlan") -> Iterable[Dict[str, Any]]: ...
+
+
+@runtime_checkable
+class SupportsDataFrameQuery(Protocol):
+    def dataframe_query_plan(self, plan: "QueryPlan"):
+        ...
 
 
 @runtime_checkable
